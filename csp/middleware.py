@@ -5,7 +5,6 @@ import http.client as http_client
 import os
 import warnings
 from dataclasses import asdict, dataclass
-from functools import partial
 from typing import TYPE_CHECKING
 
 from django.conf import settings
@@ -61,14 +60,16 @@ class CSPMiddleware(MiddlewareMixin):
         return nonce
 
     @staticmethod
-    def _csp_nonce_post_response() -> None:
+    def _csp_nonce_post_response() -> str:
         raise CSPNonceError(
             "The 'csp_nonce' attribute is not available after the CSP header has been written. Consider adjusting your MIDDLEWARE order."
         )
 
     def process_request(self, request: HttpRequest) -> None:
-        nonce = partial(self._make_nonce, request)
-        setattr(request, "csp_nonce", CheckableLazyObject(nonce))
+        # Eagerly generate the nonce when the request enters so that the value
+        # written into the response headers is always the same value the
+        # templates render with, regardless of which happens first.
+        setattr(request, "csp_nonce", self._make_nonce(request))
 
     def process_response(self, request: HttpRequest, response: HttpResponseBase) -> HttpResponseBase:
         # Check for debug view
@@ -103,9 +104,13 @@ class CSPMiddleware(MiddlewareMixin):
             if no_header and is_not_exempt and is_not_excluded:
                 response[HEADER_REPORT_ONLY] = csp_ro
 
-        # Once we've written the header, accessing the `request.csp_nonce` will no longer trigger
-        # the nonce to be added to the header. Instead we throw an error here to catch this since
-        # this has security implications.
+        # Once the headers are written, a nonce that was never finalized cannot
+        # influence them anymore. In that case replace `csp_nonce` with an
+        # object that keeps `bool()` checks safe but raises when its string
+        # value is read, rather than silently rendering an empty nonce. A
+        # nonce finalized at request entry is left untouched so responses whose
+        # body renders after the headers (e.g. streaming responses) can still
+        # read the same value that was written into the policy.
         if getattr(request, "_csp_nonce", None) is None:
             setattr(request, "csp_nonce", CheckableLazyObject(self._csp_nonce_post_response))
 

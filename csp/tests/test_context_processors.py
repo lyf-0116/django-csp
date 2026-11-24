@@ -18,7 +18,7 @@ def test_nonce_context_processor() -> None:
     context = nonce(request)
 
     response = HttpResponse()
-    csp_nonce = getattr(request, "csp_nonce")
+    csp_nonce = getattr(request, "_csp_nonce")
     mw.process_response(request, response)
 
     assert context["CSP_NONCE"] == csp_nonce
@@ -30,11 +30,21 @@ def test_nonce_context_processor_after_response() -> None:
     context = nonce(request)
 
     response = HttpResponse()
-    csp_nonce = getattr(request, "csp_nonce")
+    csp_nonce = getattr(request, "_csp_nonce")
     mw.process_response(request, response)
 
     assert context["CSP_NONCE"] == csp_nonce
 
+    # A finalized nonce stays readable after the response is processed.
+    assert str(getattr(request, "csp_nonce")) == csp_nonce
+
+
+def test_nonce_context_processor_missing_nonce_after_response() -> None:
+    request = rf.get("/")
+    mw.process_response(request, HttpResponse())
+
+    # Without a finalized nonce, reading it after the response must raise
+    # rather than silently returning an empty value.
     with pytest.raises(CSPNonceError):
         str(getattr(request, "csp_nonce"))
 

@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, Any, Callable
 from django.http import HttpResponse
 from django.template import Context, Template, engines
 from django.test import RequestFactory
-from django.utils.functional import SimpleLazyObject
 
 from csp.middleware import CSPMiddleware
 
@@ -40,7 +39,7 @@ class ScriptTestBase(ABC):
         request = rf.get("/")
         mw.process_request(request)
         nonce = getattr(request, "csp_nonce")
-        assert isinstance(nonce, SimpleLazyObject)
+        assert isinstance(nonce, str) and nonce
         return (self.render(tpl, request).strip(), expected.format(nonce))
 
     @abstractmethod

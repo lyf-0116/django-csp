@@ -9,7 +9,7 @@ from django.test.utils import override_settings
 
 import pytest
 
-from csp.constants import HEADER, HEADER_REPORT_ONLY, SELF
+from csp.constants import HEADER, HEADER_REPORT_ONLY, NONCE, SELF
 from csp.exceptions import CSPNonceError
 from csp.middleware import CheckableLazyObject, CSPMiddleware
 from csp.tests.utils import response
@@ -152,21 +152,24 @@ def test_nonce_created_when_accessed() -> None:
     assert response[HEADER] == f"default-src 'self' 'nonce-{nonce}'"
 
 
-def test_nonce_is_false_before_access_and_true_after() -> None:
+def test_nonce_is_generated_eagerly_and_truthy() -> None:
     request = rf.get("/")
     mw.process_request(request)
-    assert bool(getattr(request, "csp_nonce")) is False
-    nonce = str(getattr(request, "csp_nonce"))
+    # The nonce is finalized when the request enters, before anything reads it.
+    nonce = getattr(request, "csp_nonce")
+    assert isinstance(nonce, str) and nonce
     assert bool(getattr(request, "csp_nonce")) is True
 
     response = HttpResponse()
     mw.process_response(request, response)
+    # The finalized nonce stays readable after the headers are written so
+    # responses whose body renders late (streaming) still get the same value.
     assert bool(getattr(request, "csp_nonce")) is True
     assert getattr(request, "csp_nonce") == nonce
 
 
 def test_nonce_conditional_in_django_template() -> None:
-    """An unset nonce is Falsy in a template context"""
+    """A finalized nonce is truthy in a Django template context"""
 
     template = Template(
         """
@@ -181,16 +184,13 @@ def test_nonce_conditional_in_django_template() -> None:
     context = Context({"request": request})
 
     mw.process_request(request)
-    rendered_unset = template.render(context).strip()
-    assert rendered_unset == "The CSP nonce is not set."
-
-    nonce = str(getattr(request, "csp_nonce"))
+    nonce = getattr(request, "csp_nonce")
     rendered_set = template.render(context).strip()
     assert rendered_set == f"The CSP nonce is {nonce}."
 
 
 def test_nonce_usage_in_django_template() -> None:
-    """Reading a nonce in a template context generates the nonce"""
+    """The request nonce renders in a Django template"""
 
     template = Template("The CSP nonce is {{ request.csp_nonce }}.")
     request = rf.get("/")
@@ -198,14 +198,14 @@ def test_nonce_usage_in_django_template() -> None:
 
     mw.process_request(request)
     nonce = getattr(request, "csp_nonce", None)
-    assert bool(nonce) is False
+    assert isinstance(nonce, str) and bool(nonce) is True
     rendered = template.render(context)
     assert bool(nonce) is True
     assert rendered == f"The CSP nonce is {nonce}."
 
 
 def test_nonce_conditional_in_jinja2_template() -> None:
-    """An unset nonce is Falsy in a template context"""
+    """A finalized nonce is truthy in a Jinja2 template context"""
 
     template = engines["jinja2"].from_string(
         """
@@ -220,16 +220,13 @@ def test_nonce_conditional_in_jinja2_template() -> None:
     context = {"request": request}
 
     mw.process_request(request)
-    rendered_unset = template.render(context).strip()
-    assert rendered_unset == "The CSP nonce is not set."
-
-    nonce = str(getattr(request, "csp_nonce"))
+    nonce = getattr(request, "csp_nonce")
     rendered_set = template.render(context).strip()
     assert rendered_set == f"The CSP nonce is {nonce}."
 
 
 def test_nonce_usage_in_jinja2_template() -> None:
-    """Reading a nonce in a template context generates the nonce"""
+    """The request nonce renders in a Jinja2 template"""
 
     template = engines["jinja2"].from_string("The CSP nonce is {{ request.csp_nonce }}.")
     request = rf.get("/")
@@ -237,19 +234,33 @@ def test_nonce_usage_in_jinja2_template() -> None:
 
     mw.process_request(request)
     nonce = getattr(request, "csp_nonce", None)
-    assert bool(nonce) is False
+    assert isinstance(nonce, str) and bool(nonce) is True
     rendered = template.render(context)
     assert bool(nonce) is True
     assert rendered == f"The CSP nonce is {nonce}."
 
 
-def test_no_nonce_when_not_accessed() -> None:
+def test_nonce_always_included_in_header() -> None:
     request = rf.get("/")
     mw.process_request(request)
     response = HttpResponse()
     mw.process_response(request, response)
-    assert "nonce-" not in response[HEADER]
-    assert response[HEADER] == "default-src 'self'"
+    nonce = getattr(request, "_csp_nonce")
+    assert response[HEADER] == f"default-src 'self' 'nonce-{nonce}'"
+
+
+@override_settings(
+    CONTENT_SECURITY_POLICY={"DIRECTIVES": {"default-src": [SELF, NONCE]}},
+    CONTENT_SECURITY_POLICY_REPORT_ONLY={"DIRECTIVES": {"default-src": [SELF, NONCE]}},
+)
+def test_same_nonce_in_enforced_and_report_only_headers() -> None:
+    request = rf.get("/")
+    mw.process_request(request)
+    nonce = getattr(request, "_csp_nonce")
+    response = HttpResponse()
+    mw.process_response(request, response)
+    assert response[HEADER] == f"default-src 'self' 'nonce-{nonce}'"
+    assert response[HEADER_REPORT_ONLY] == f"default-src 'self' 'nonce-{nonce}'"
 
 
 def test_nonce_regenerated_on_new_request() -> None:
@@ -269,21 +280,50 @@ def test_nonce_regenerated_on_new_request() -> None:
     assert nonce2 not in response1[HEADER]
 
 
-def test_no_nonce_access_after_middleware_is_attribute_error() -> None:
-    # Test `CSPNonceError` is raised when accessing an unset nonce after the response has been processed.
+def test_missing_nonce_access_after_header_is_written_raises() -> None:
+    # If no nonce was finalized before the headers were written (e.g.
+    # process_request was skipped), reading it afterwards must raise instead of
+    # silently rendering an empty nonce.
     request = rf.get("/")
-    mw.process_request(request)
     mw.process_response(request, HttpResponse())
     assert bool(getattr(request, "csp_nonce", True)) is False
     with pytest.raises(CSPNonceError):
         str(getattr(request, "csp_nonce"))
 
 
-def test_set_nonce_access_after_middleware_is_ok() -> None:
-    # Test accessing a set nonce after the response has been processed is OK.
+def test_finalized_nonce_read_after_header_is_still_available() -> None:
+    # A finalized nonce remains readable after the headers are written.
     request = rf.get("/")
     mw.process_request(request)
     nonce = str(getattr(request, "csp_nonce"))
-    mw.process_response(request, HttpResponse())
-    assert bool(getattr(request, "csp_nonce", False)) is True
+    response = HttpResponse()
+    mw.process_response(request, response)
+    assert nonce in response[HEADER]
+    assert response[HEADER] == f"default-src 'self' 'nonce-{nonce}'"
     assert str(getattr(request, "csp_nonce")) == nonce
+
+
+def test_streaming_response_nonce_matches_rendered_template() -> None:
+    # Streaming responses write their headers before the response iterator
+    # renders the body. The nonce embedded in the body's inline scripts must
+    # still match the nonce in the CSP header.
+    template = Template("<script nonce='{{ request.csp_nonce }}'>var hello='world';</script>")
+    request = rf.get("/")
+    mw.process_request(request)
+    nonce = str(getattr(request, "csp_nonce"))
+
+    response = HttpResponse()
+    mw.process_response(request, response)
+
+    # The body is rendered only after `process_response`, as with a streaming response.
+    rendered_body = template.render(Context({"request": request}))
+    assert f"nonce='{nonce}'" in rendered_body
+    assert f"'nonce-{nonce}'" in response[HEADER]
+
+
+def test_nonce_is_stable_within_a_request() -> None:
+    request = rf.get("/")
+    mw.process_request(request)
+    first = getattr(request, "csp_nonce")
+    second = getattr(request, "csp_nonce")
+    assert first == second == getattr(request, "_csp_nonce")

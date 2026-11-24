@@ -71,27 +71,22 @@ separate list to using a sentinel `NONCE` value in the directive itself.
   }
   ```
 
-- **Nonce Behavior**: Changed how `request.csp_nonce` works - it is now Falsy
-(`bool(request.csp_nonce)`) until it is read as a string (e.g., used in a template or with
-`str(request.csp_nonce)`). Previously, it always tested as `True`, and testing generated the nonce.
-([#270](https://github.com/mozilla/django-csp/pull/270))
+- **Nonce Behavior**: The nonce is now generated eagerly when the request enters
+`CSPMiddleware.process_request` and finalized once per request. Previously
+`request.csp_nonce` was a lazily evaluated object that was only generated when read as a string,
+which could cause the response headers to be written without a nonce (or with a different value)
+when the template rendered after the headers -- notably for streaming responses, whose inline
+scripts were then blocked by the browser.
 
-  **Before:**
-  ```python
-  # The nonce was generated when this was evaluated
-  if request.csp_nonce:
-      # Do something with nonce
-  ```
-
-  **After:**
-  ```python
-  # This won't generate the nonce, and will evaluate to False until nonce is read as a string
-  if request.csp_nonce:
-      # This code won't run until nonce is used as a string
-
-  # To generate and use the nonce
-  nonce_value = str(request.csp_nonce)
-  ```
+  - `request.csp_nonce` is now a plain string that is truthy and stable for the whole request, and
+  the same value is written into both the enforced and report-only policy headers.
+  - The nonce is included in a header whenever the `NONCE` sentinel is present in a directive,
+  regardless of whether the template reads it.
+  - Reading a finalized nonce after the response is processed remains safe (e.g. late-rendered
+  streaming bodies). Only when no nonce was finalized before the headers were written (for example
+  when a custom setup skips `process_request`) does reading `str(request.csp_nonce)` afterwards
+  raise `csp.exceptions.CSPNonceError` instead of silently producing an empty nonce. `bool()`
+  checks remain safe in every case.
 
 - Dropped support for Django ≤3.2.
 - Dropped support for Python 3.8.

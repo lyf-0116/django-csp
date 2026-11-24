@@ -6,6 +6,14 @@ used**, e.g. by evaluating the nonce in your template.  To actually make the bro
 with this value, you will need to include it in the attributes of the tags that you wish to mark as
 safe.
 
+.. Note::
+
+   When using both an enforced and a report-only policy, prefer declaring nonce placement once
+   with the shared ``CONTENT_SECURITY_POLICY_INCLUDE_NONCE_IN`` setting (see
+   :ref:`configuration <configuration-chapter>`) instead of adding the ``NONCE`` sentinel to each
+   policy's directives. Both policies then derive their nonced directives from a single
+   declaration and cannot drift apart.
+
 
 .. Note::
 

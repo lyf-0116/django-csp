@@ -92,6 +92,27 @@ a more slightly strict policy and is used to test the policy without breaking th
         def my_view(request): ...
 
 
+Shared Settings
+===============
+
+Some settings are shared by both the enforced and the report-only policy, so that the two
+policies cannot drift apart.
+
+``CONTENT_SECURITY_POLICY_INCLUDE_NONCE_IN``
+    A ``tuple`` or ``list`` of directive names that should include the generated nonce.
+    The ``csp.constants.NONCE`` sentinel is added to each named directive in **both** the
+    ``CONTENT_SECURITY_POLICY`` and the ``CONTENT_SECURITY_POLICY_REPORT_ONLY`` policy, so
+    nonce placement only has to be declared once. Directives named here that are not present
+    in a policy are left out of that policy. *default=[]*
+
+    .. code-block:: python
+
+        CONTENT_SECURITY_POLICY_INCLUDE_NONCE_IN = ["script-src", "style-src"]
+
+    Any differences in the directives themselves between the two policies still have to be
+    listed explicitly in each policy's ``DIRECTIVES``.
+
+
 Policy Settings
 ===============
 

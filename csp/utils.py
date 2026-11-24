@@ -115,6 +115,18 @@ def build_policy(
             else:
                 csp[k] += tuple(v)
 
+    # Inject the `NONCE` sentinel into the directives named by the shared
+    # `CONTENT_SECURITY_POLICY_INCLUDE_NONCE_IN` setting. Both the enforced and the
+    # report-only policies are built through this function, so nonce placement is
+    # derived from a single declaration and cannot drift between the two policies.
+    include_nonce_in = getattr(settings, "CONTENT_SECURITY_POLICY_INCLUDE_NONCE_IN", [])
+    for directive in include_nonce_in:
+        value = csp.get(directive)
+        if value is None or isinstance(value[0], bool):
+            # Only add nonces to directives that are present and source-valued.
+            continue
+        csp[directive] = (*value, NONCE)
+
     report_uri = csp.pop("report-uri", None)
 
     policy_parts = {}

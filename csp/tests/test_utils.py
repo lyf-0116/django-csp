@@ -338,6 +338,70 @@ def test_only_nonce_in_value() -> None:
     policy_eq("default-src 'nonce-abc123'", policy)
 
 
+@override_settings(
+    CONTENT_SECURITY_POLICY={"DIRECTIVES": {"default-src": [SELF], "script-src": [SELF]}},
+    CONTENT_SECURITY_POLICY_INCLUDE_NONCE_IN=["script-src"],
+)
+def test_include_nonce_in() -> None:
+    policy = build_policy(nonce="abc123")
+    policy_eq("default-src 'self'; script-src 'self' 'nonce-abc123'", policy)
+
+
+@override_settings(
+    CONTENT_SECURITY_POLICY={"DIRECTIVES": {"default-src": [SELF], "script-src": [SELF]}},
+    CONTENT_SECURITY_POLICY_REPORT_ONLY={"DIRECTIVES": {"default-src": [SELF], "script-src": [SELF]}},
+    CONTENT_SECURITY_POLICY_INCLUDE_NONCE_IN=["script-src"],
+)
+def test_include_nonce_in_shared_with_report_only() -> None:
+    # The shared `CONTENT_SECURITY_POLICY_INCLUDE_NONCE_IN` declaration applies to
+    # both the enforced and the report-only policy.
+    policy = build_policy(nonce="abc123")
+    policy_eq("default-src 'self'; script-src 'self' 'nonce-abc123'", policy)
+    policy_ro = build_policy(report_only=True, nonce="abc123")
+    policy_eq("default-src 'self'; script-src 'self' 'nonce-abc123'", policy_ro)
+
+
+@override_settings(
+    CONTENT_SECURITY_POLICY={"DIRECTIVES": {"default-src": [SELF], "script-src": [SELF]}},
+    CONTENT_SECURITY_POLICY_INCLUDE_NONCE_IN=["script-src"],
+)
+def test_include_nonce_in_no_nonce() -> None:
+    # The injected `NONCE` sentinel is stripped when no nonce is provided.
+    policy = build_policy()
+    policy_eq("default-src 'self'; script-src 'self'", policy)
+
+
+@override_settings(
+    CONTENT_SECURITY_POLICY={"DIRECTIVES": {"default-src": [SELF]}},
+    CONTENT_SECURITY_POLICY_INCLUDE_NONCE_IN=["script-src"],
+)
+def test_include_nonce_in_missing_directive() -> None:
+    # Directives named in `CONTENT_SECURITY_POLICY_INCLUDE_NONCE_IN` but absent
+    # from the policy are not created.
+    policy = build_policy(nonce="abc123")
+    policy_eq("default-src 'self'", policy)
+
+
+@override_settings(
+    CONTENT_SECURITY_POLICY={"DIRECTIVES": {"default-src": [SELF], "upgrade-insecure-requests": True}},
+    CONTENT_SECURITY_POLICY_INCLUDE_NONCE_IN=["upgrade-insecure-requests"],
+)
+def test_include_nonce_in_boolean_directive() -> None:
+    # Boolean directives are not source-valued, so no nonce is injected.
+    policy = build_policy(nonce="abc123")
+    policy_eq("default-src 'self'; upgrade-insecure-requests", policy)
+
+
+@override_settings(
+    CONTENT_SECURITY_POLICY={"DIRECTIVES": {"default-src": [SELF], "script-src": [SELF, NONCE]}},
+    CONTENT_SECURITY_POLICY_INCLUDE_NONCE_IN=["script-src"],
+)
+def test_include_nonce_in_deduplicates_sentinel() -> None:
+    # A directive already carrying the `NONCE` sentinel only gets one nonce.
+    policy = build_policy(nonce="abc123")
+    policy_eq("default-src 'self'; script-src 'self' 'nonce-abc123'", policy)
+
+
 @override_settings(CONTENT_SECURITY_POLICY={"DIRECTIVES": {"img-src": ["example.com", "example.com"]}})
 def test_deduplicate_values() -> None:
     """

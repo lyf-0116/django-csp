@@ -152,6 +152,22 @@ def test_nonce_created_when_accessed() -> None:
     assert response[HEADER] == f"default-src 'self' 'nonce-{nonce}'"
 
 
+@override_settings(
+    CONTENT_SECURITY_POLICY={"DIRECTIVES": {"default-src": [SELF], "script-src": [SELF]}},
+    CONTENT_SECURITY_POLICY_REPORT_ONLY={"DIRECTIVES": {"default-src": [SELF], "script-src": [SELF]}},
+    CONTENT_SECURITY_POLICY_INCLUDE_NONCE_IN=["script-src"],
+)
+def test_include_nonce_in_shared_by_both_headers() -> None:
+    request = rf.get("/")
+    mw.process_request(request)
+    nonce = str(getattr(request, "csp_nonce"))
+    response = HttpResponse()
+    mw.process_response(request, response)
+    expected = sorted(f"default-src 'self'; script-src 'self' 'nonce-{nonce}'".split("; "))
+    assert sorted(response[HEADER].split("; ")) == expected
+    assert sorted(response[HEADER_REPORT_ONLY].split("; ")) == expected
+
+
 def test_nonce_is_false_before_access_and_true_after() -> None:
     request = rf.get("/")
     mw.process_request(request)

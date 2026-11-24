@@ -98,6 +98,16 @@ separate list to using a sentinel `NONCE` value in the directive itself.
 
 ## New Features and Improvements
 
+- **Shared Nonce Configuration**: Added the `CONTENT_SECURITY_POLICY_INCLUDE_NONCE_IN` setting, a
+single list of directive names that should include the generated nonce. It applies to both the
+enforced and the report-only policy, so nonce placement is declared once and cannot drift between
+the two policies.
+
+  **Example:**
+  ```python
+  CONTENT_SECURITY_POLICY_INCLUDE_NONCE_IN = ["script-src", "style-src"]
+  ```
+
 - **Dual Policy Support**: Added support for enforced and report-only policies simultaneously using
 the separate `CONTENT_SECURITY_POLICY` and `CONTENT_SECURITY_POLICY_REPORT_ONLY` settings.
 

@@ -1,0 +1,236 @@
+diff --git a/CHANGES.md b/CHANGES.md
+index 286f85b..3a26d92 100644
+--- a/CHANGES.md
++++ b/CHANGES.md
+@@ -18,6 +18,14 @@ Unreleased
+ - Never look at the `X-Forwarded-For` header, always use `request.remote_addr`,
+   requiring the developer to configure `ProxyFix` appropriately. #700
+ - Remove `LOGIN_DISABLED` config. #697
++- `login_user()` now removes existing `SESSION_KEYS` before writing the new
++  login state. This prevents values such as `next` and `_remember_seconds` from
++  being inherited by another user. Views using `USE_SESSION_FOR_NEXT` should
++  read or pop `next` before calling `login_user()`.
++- BREAKING: `login_user()` now defaults to `fresh=False`. Interactive views that
++  have just verified a password or another full credential should pass
++  `fresh=True` explicitly. This avoids marking SSO callbacks and server-side
++  session reconstruction as freshly authenticated by accident.
+ 
+ 
+ Version 0.6.3
+diff --git a/README.md b/README.md
+index 882c390..b59beaf 100644
+--- a/README.md
++++ b/README.md
+@@ -76,7 +76,8 @@ def login():
+     if user is None or user.password != flask.request.form["password"]:
+         return flask.redirect(flask.url_for("login"))
+ 
+-    flask_login.login_user(user)
++    # The password submission just completed full authentication.
++    flask_login.login_user(user, fresh=True)
+     return flask.redirect(flask.url_for("protected"))
+ 
+ @app.route("/protected")
+diff --git a/docs/index.rst b/docs/index.rst
+index 0ee0a2d..6b3fcdd 100644
+--- a/docs/index.rst
++++ b/docs/index.rst
+@@ -127,7 +127,8 @@ function.
+         if form.validate_on_submit():
+             # Login and validate the user.
+             # user should be an instance of your `User` class
+-            login_user(user)
++            # The password/form submission just completed full authentication.
++            login_user(user, fresh=True)
+ 
+             flask.flash('Logged in successfully.')
+ 
+@@ -197,6 +198,10 @@ query string, which is the page that the user was trying to access. Alternativel
+ if `USE_SESSION_FOR_NEXT` is `True`, the page is stored in the session under the
+ key ``next``.
+ 
++When using the session key, read or pop it in your login view before calling
++`login_user`; stale Flask-Login session keys, including ``next``, are cleared as
++part of establishing the new login state.
++
+ If you would like to customize the process further, decorate a function with
+ `LoginManager.unauthorized_handler`::
+ 
+@@ -318,13 +323,16 @@ id must still uniquely identify the user... think of it as a second user ID.
+ 
+ Fresh Logins
+ ============
+-When a user logs in, their session is marked as "fresh," which indicates that
+-they actually authenticated on that session. When their session is destroyed
+-and they are logged back in with a "remember me" cookie, it is marked as
+-"non-fresh." `login_required` does not differentiate between freshness, which
+-is fine for most pages. However, sensitive actions like changing one's
+-personal information should require a fresh login. (Actions like changing
+-one's password should always require a password re-entry regardless.)
++A fresh session indicates that full authentication happened during this
++session. Interactive login views that verify a password or equivalent
++credential should call ``login_user(user, fresh=True)``. The ``fresh`` argument
++now defaults to ``False`` so SSO callbacks and programmatic or server-side
++session reconstruction do not accidentally satisfy fresh-login requirements.
++When a session is restored with a "remember me" cookie, it remains
++"non-fresh." `login_required` does not differentiate between freshness, which is
++fine for most pages. However, sensitive actions like changing one's personal
++information should require a fresh login. (Actions like changing one's password
++should always require a password re-entry regardless.)
+ 
+ `fresh_login_required`, in addition to verifying that the user is logged
+ in, will also ensure that their login is fresh. If not, it will send them to
+diff --git a/src/flask_login/utils.py b/src/flask_login/utils.py
+index 8abe153..b7da746 100644
+--- a/src/flask_login/utils.py
++++ b/src/flask_login/utils.py
+@@ -16,6 +16,7 @@ from werkzeug.local import LocalProxy
+ 
+ from .config import COOKIE_NAME
+ from .config import EXEMPT_METHODS
++from .config import SESSION_KEYS
+ from .signals import user_logged_in
+ from .signals import user_logged_out
+ from .signals import user_login_confirmed
+@@ -151,7 +152,7 @@ def login_remembered():
+     return False
+ 
+ 
+-def login_user(user, remember=False, duration=None, force=False, fresh=True):
++def login_user(user, remember=False, duration=None, force=False, fresh=False):
+     """
+     Logs a user in. You should pass the actual user object to this. If the
+     user's `is_active` property is ``False``, they will not be logged in
+@@ -171,13 +172,19 @@ def login_user(user, remember=False, duration=None, force=False, fresh=True):
+     :param force: If the user is inactive, setting this to ``True`` will log
+         them in regardless. Defaults to ``False``.
+     :type force: bool
+-    :param fresh: setting this to ``False`` will log in the user with a session
+-        marked as not "fresh". Defaults to ``True``.
++    :param fresh: setting this to ``True`` will mark the session as having
++        recently completed full authentication. Defaults to ``False`` so
++        non-interactive and server-side session reconstruction paths do not
++        accidentally satisfy fresh-login requirements. Interactive password
++        login views should pass ``fresh=True`` explicitly.
+     :type fresh: bool
+     """
+     if not force and not user.is_active:
+         return False
+ 
++    for key in SESSION_KEYS:
++        session.pop(key, None)
++
+     user_id = getattr(user, current_app.login_manager.id_attribute)()
+     session["_user_id"] = user_id
+     session["_fresh"] = fresh
+diff --git a/tests/test_login.py b/tests/test_login.py
+index 8bcb4d7..c98f00b 100644
+--- a/tests/test_login.py
++++ b/tests/test_login.py
+@@ -234,21 +234,28 @@ class LoginTestCase(unittest.TestCase):
+ 
+         @self.app.route("/login-notch")
+         def login_notch():
+-            return str(login_user(notch))
++            return str(login_user(notch, fresh=True))
+ 
+         @self.app.route("/login-notch-remember")
+         def login_notch_remember():
+-            return str(login_user(notch, remember=True))
++            return str(login_user(notch, remember=True, fresh=True))
+ 
+         @self.app.route("/login-notch-remember-custom")
+         def login_notch_remember_custom():
+             duration = timedelta(hours=7)
+-            return str(login_user(notch, remember=True, duration=duration))
++            return str(
++                login_user(
++                    notch,
++                    remember=True,
++                    duration=duration,
++                    fresh=True,
++                )
++            )
+ 
+         @self.app.route("/login-notch-permanent")
+         def login_notch_permanent():
+             session.permanent = True
+-            return str(login_user(notch))
++            return str(login_user(notch, fresh=True))
+ 
+         @self.app.route("/needs-refresh")
+         def needs_refresh():
+@@ -326,11 +333,17 @@ class LoginTestCase(unittest.TestCase):
+ 
+     def test_login_user(self):
+         with self.app.test_request_context():
+-            result = login_user(notch)
++            result = login_user(notch, fresh=True)
+             self.assertTrue(result)
+             self.assertEqual(current_user.name, "Notch")
+             self.assertIs(login_fresh(), True)
+ 
++    def test_login_user_defaults_to_not_fresh(self):
++        with self.app.test_request_context():
++            result = login_user(notch)
++            self.assertTrue(result)
++            self.assertIs(login_fresh(), False)
++
+     def test_login_user_not_fresh(self):
+         with self.app.test_request_context():
+             result = login_user(notch, fresh=False)
+@@ -338,6 +351,45 @@ class LoginTestCase(unittest.TestCase):
+             self.assertEqual(current_user.name, "Notch")
+             self.assertIs(login_fresh(), False)
+ 
++    def test_login_user_resets_flask_login_session_keys(self):
++        with self.app.test_request_context():
++            session["_user_id"] = "old-id"
++            session["_fresh"] = False
++            session["_id"] = "old-session-id"
++            session["_remember"] = "set"
++            session["_remember_seconds"] = 123
++            session["next"] = "/old-next"
++            session["application_data"] = "keep"
++
++            self.assertTrue(login_user(notch, fresh=True))
++
++            self.assertEqual(session["_user_id"], notch.get_id())
++            self.assertIs(session["_fresh"], True)
++            self.assertNotEqual(session["_id"], "old-session-id")
++            self.assertNotIn("_remember", session)
++            self.assertNotIn("_remember_seconds", session)
++            self.assertNotIn("next", session)
++            self.assertEqual(session["application_data"], "keep")
++
++    def test_login_user_clears_stale_remember_duration_without_remember(self):
++        with self.app.test_request_context():
++            session["_remember"] = "set"
++            session["_remember_seconds"] = 123
++
++            self.assertTrue(login_user(notch, fresh=True))
++
++            self.assertNotIn("_remember", session)
++            self.assertNotIn("_remember_seconds", session)
++
++    def test_login_user_clears_stale_remember_duration_when_duration_omitted(self):
++        with self.app.test_request_context():
++            session["_remember_seconds"] = 123
++
++            self.assertTrue(login_user(notch, remember=True, fresh=True))
++
++            self.assertEqual(session["_remember"], "set")
++            self.assertNotIn("_remember_seconds", session)
++
+     def test_login_user_emits_signal(self):
+         with self.app.test_request_context():
+             with listen_to(user_logged_in) as listener:
+@@ -1417,7 +1469,7 @@ class UnicodeCookieUserIDTestCase(unittest.TestCase):
+ 
+         @self.app.route("/login-germanjapanese-remember")
+         def login_germanjapanese_remember():
+-            return str(login_user(germanjapanese, remember=True))
++            return str(login_user(germanjapanese, remember=True, fresh=True))
+ 
+         @self.app.route("/username")
+         def username():

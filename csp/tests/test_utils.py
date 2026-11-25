@@ -2,7 +2,14 @@ from django.test.utils import override_settings
 from django.utils.functional import lazy
 
 from csp.constants import NONCE, NONE, SELF
-from csp.utils import DEFAULT_DIRECTIVES, build_policy, default_config
+from csp.utils import (
+    DEFAULT_DIRECTIVES,
+    build_policy,
+    default_config,
+    merge_policies,
+    parse_policy,
+    serialize_policy,
+)
 
 
 def policy_eq(a: str, b: str) -> None:
@@ -336,6 +343,92 @@ def test_nonce_in_value() -> None:
 def test_only_nonce_in_value() -> None:
     policy = build_policy(nonce="abc123")
     policy_eq("default-src 'nonce-abc123'", policy)
+
+
+def test_parse_and_serialize_policy() -> None:
+    parsed = parse_policy(" default-src 'self'; script-src 'nonce-a' 'sha256-b'; ")
+    assert parsed == {
+        "default-src": ["'self'"],
+        "script-src": ["'nonce-a'", "'sha256-b'"],
+    }
+    policy_eq(
+        "default-src 'self'; script-src 'nonce-a' 'sha256-b'",
+        serialize_policy(parsed),
+    )
+
+
+def test_merge_policies_unions_source_lists() -> None:
+    merged = merge_policies("script-src 'self'", "script-src cdn.example")
+    policy_eq("script-src 'self' cdn.example", merged)
+
+
+def test_merge_policies_deduplicates_equivalent_sources() -> None:
+    merged = merge_policies("script-src 'SELF' https://Example.COM", "script-src 'self' HTTPS://example.com")
+    policy_eq("script-src 'SELF' https://Example.COM", merged)
+
+
+def test_merge_policies_none_is_strict() -> None:
+    merged = merge_policies("img-src 'none'", "img-src example.com")
+    policy_eq("img-src 'none'", merged)
+
+
+def test_merge_policies_wildcard_yields_to_specific_source() -> None:
+    merged = merge_policies("img-src *", "img-src https://example.com")
+    policy_eq("img-src https://example.com", merged)
+
+
+def test_merge_policies_resolves_default_src_fallback() -> None:
+    merged = merge_policies("script-src 'sha256-abc'", "default-src 'self'")
+    policy_eq("default-src 'self'; script-src 'sha256-abc' 'self'", merged)
+
+
+def test_merge_policies_resolves_script_element_fallback() -> None:
+    merged = merge_policies(
+        "script-src-elem 'sha256-abc'",
+        "script-src 'self' 'nonce-abc123'",
+    )
+    policy_eq(
+        "script-src 'self' 'nonce-abc123'; script-src-elem 'sha256-abc' 'self' 'nonce-abc123'",
+        merged,
+    )
+
+
+def test_merge_policies_combines_reporting_directives() -> None:
+    merged = merge_policies("report-uri /one", "report-uri /two")
+    policy_eq("report-uri /one /two", merged)
+
+
+def test_merge_policies_intersects_sandbox_permissions() -> None:
+    merged = merge_policies(
+        "sandbox allow-scripts allow-forms",
+        "sandbox allow-scripts allow-same-origin",
+    )
+    policy_eq("sandbox allow-scripts", merged)
+
+
+def test_merge_policies_bare_sandbox_is_strictest() -> None:
+    merged = merge_policies("sandbox allow-scripts", "sandbox")
+    policy_eq("sandbox", merged)
+
+
+def test_merge_policies_preserves_boolean_directive() -> None:
+    merged = merge_policies("default-src 'self'", "upgrade-insecure-requests")
+    policy_eq("default-src 'self'; upgrade-insecure-requests", merged)
+
+
+def test_merge_policies_removes_unsafe_inline_when_hash_is_present() -> None:
+    merged = merge_policies("script-src 'unsafe-inline'", "script-src 'sha256-abc'")
+    policy_eq("script-src 'sha256-abc'", merged)
+
+
+def test_merge_policies_strict_intersection_uses_none_for_disjoint_sources() -> None:
+    merged = merge_policies("script-src 'self'", "script-src cdn.example", strict=True)
+    policy_eq("script-src 'none'", merged)
+
+
+def test_merge_policies_strict_intersection_keeps_common_source() -> None:
+    merged = merge_policies("script-src 'self' cdn.example", "script-src cdn.example 'nonce-a'", strict=True)
+    policy_eq("script-src cdn.example", merged)
 
 
 @override_settings(CONTENT_SECURITY_POLICY={"DIRECTIVES": {"img-src": ["example.com", "example.com"]}})

@@ -149,3 +149,61 @@ are in use, as shown below.
     )
     def myview(request):
         return render(...)
+
+
+Conditional updates inside a view
+=================================
+
+Decorators are convenient when the policy change is known while defining the
+view. For values that are only known after rendering or hashing a response, set
+the same response attribute that the decorator would have set:
+
+.. code-block:: python
+
+    def myview(request):
+        # Compute this from the exact inline <script> body, without the tags.
+        script_hash = "sha256-..."
+        response = render(request, "inline.html")
+        response._csp_update = {"script-src": [f"'{script_hash}'"]}
+        return response
+
+Use ``_csp_update_ro`` for a report-only addition. The middleware still builds
+and writes the header once, so the view-provided hash and request nonce end up
+in the same directive.
+
+
+Headers written directly by views
+=================================
+
+If a view or another WSGI component sets ``Content-Security-Policy`` before
+``CSPMiddleware`` processes the response, the middleware parses that header and
+merges it with the policy generated from settings and response attributes. This
+avoids emitting two policy headers.
+
+The default ``"compose"`` mode combines source lists and resolves
+``default-src`` and the more specific fallback chains before merging. A sole
+``'none'`` value and an empty ``sandbox`` remain strict, sandbox permission
+tokens are intersected, reporting endpoints are combined, and
+``'unsafe-inline'`` is removed when a nonce or hash is also present.
+
+Because composing two independently complete policies can be more permissive
+than letting the browser enforce both headers, subclasses can select the
+browser-like intersection mode:
+
+.. code-block:: python
+
+    class StrictCSPMiddleware(CSPMiddleware):
+        existing_header_merge_mode = "strict"
+
+In strict mode, source expressions that are not present on both sides become
+``'none'`` after fallback resolution. Prefer ``_csp_update`` when a view has a
+hash or other exception that must be included in the generated policy rather
+than intersected with it.
+
+To restore the previous behavior of leaving a response-provided header
+completely untouched:
+
+.. code-block:: python
+
+    class PreserveViewCSPMiddleware(CSPMiddleware):
+        merge_existing_headers = False

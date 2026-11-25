@@ -14,7 +14,7 @@ from django.utils.functional import SimpleLazyObject, empty
 
 from csp.constants import HEADER, HEADER_REPORT_ONLY
 from csp.exceptions import CSPNonceError
-from csp.utils import DIRECTIVES_T, build_policy
+from csp.utils import DIRECTIVES_T, build_policy, merge_policies
 
 if TYPE_CHECKING:
     from django.http import HttpRequest, HttpResponseBase
@@ -51,6 +51,14 @@ class CSPMiddleware(MiddlewareMixin):
     Can be customised by subclassing and extending the get_policy_parts method.
     """
 
+    # Set this to False to preserve the historical "leave a response-provided
+    # CSP header untouched" behavior.
+    merge_existing_headers = True
+
+    # "compose" combines the contributions into one authored policy.
+    # "strict" intersects source lists, approximating multiple browser headers.
+    existing_header_merge_mode = "compose"
+
     def _make_nonce(self, request: HttpRequest) -> str:
         # Ensure that any subsequent calls to request.csp_nonce return the same value
         stored_nonce = getattr(request, "_csp_nonce", None)
@@ -81,27 +89,33 @@ class CSPMiddleware(MiddlewareMixin):
 
         policy_parts = self.get_policy_parts(request=request, response=response)
         csp = build_policy(**asdict(policy_parts))
-        if csp:
-            # Only set header if not already set and not an excluded prefix and not exempted.
+        if csp or (HEADER in response and self.merge_existing_headers):
+            # Set, merge, or leave the header based on response state and exemptions.
             is_not_exempt = getattr(response, "_csp_exempt", False) is False
-            no_header = HEADER not in response
             policy = getattr(settings, "CONTENT_SECURITY_POLICY", None) or {}
             prefixes = policy.get("EXCLUDE_URL_PREFIXES", None) or ()
             is_not_excluded = not request.path_info.startswith(tuple(prefixes))
-            if no_header and is_not_exempt and is_not_excluded:
-                response[HEADER] = csp
+            if is_not_exempt and is_not_excluded:
+                if HEADER in response:
+                    if csp and self.merge_existing_headers:
+                        response[HEADER] = self.merge_existing_policy(response[HEADER], csp)
+                elif csp:
+                    response[HEADER] = csp
 
         policy_parts_ro = self.get_policy_parts(request=request, response=response, report_only=True)
         csp_ro = build_policy(**asdict(policy_parts_ro), report_only=True)
-        if csp_ro:
-            # Only set header if not already set and not an excluded prefix and not exempted.
+        if csp_ro or (HEADER_REPORT_ONLY in response and self.merge_existing_headers):
+            # Set, merge, or leave the report-only header using the same rules.
             is_not_exempt = getattr(response, "_csp_exempt_ro", False) is False
-            no_header = HEADER_REPORT_ONLY not in response
             policy = getattr(settings, "CONTENT_SECURITY_POLICY_REPORT_ONLY", None) or {}
             prefixes = policy.get("EXCLUDE_URL_PREFIXES", None) or ()
             is_not_excluded = not request.path_info.startswith(tuple(prefixes))
-            if no_header and is_not_exempt and is_not_excluded:
-                response[HEADER_REPORT_ONLY] = csp_ro
+            if is_not_exempt and is_not_excluded:
+                if HEADER_REPORT_ONLY in response:
+                    if csp_ro and self.merge_existing_headers:
+                        response[HEADER_REPORT_ONLY] = self.merge_existing_policy(response[HEADER_REPORT_ONLY], csp_ro, report_only=True)
+                elif csp_ro:
+                    response[HEADER_REPORT_ONLY] = csp_ro
 
         # Once we've written the header, accessing the `request.csp_nonce` will no longer trigger
         # the nonce to be added to the header. Instead we throw an error here to catch this since
@@ -120,6 +134,15 @@ class CSPMiddleware(MiddlewareMixin):
         warnings.warn("deprecated in favor of get_policy_parts", DeprecationWarning)
         policy_parts_ro = self.get_policy_parts(request=request, response=response, report_only=True)
         return build_policy(**asdict(policy_parts_ro), report_only=True)
+
+    def merge_existing_policy(
+        self,
+        existing_policy: str,
+        generated_policy: str,
+        report_only: bool = False,
+    ) -> str:
+        strict = self.existing_header_merge_mode == "strict"
+        return merge_policies(existing_policy, generated_policy, strict=strict)
 
     def get_policy_parts(
         self,

@@ -9,7 +9,7 @@ from django.test.utils import override_settings
 
 import pytest
 
-from csp.constants import HEADER, HEADER_REPORT_ONLY, SELF
+from csp.constants import HEADER, HEADER_REPORT_ONLY, NONCE, SELF
 from csp.exceptions import CSPNonceError
 from csp.middleware import CheckableLazyObject, CSPMiddleware
 from csp.tests.utils import response
@@ -92,12 +92,68 @@ def test_report_only() -> None:
     assert response[HEADER_REPORT_ONLY] == "default-src 'self'"
 
 
-def test_dont_replace() -> None:
+def test_merge_existing_header() -> None:
     request = rf.get("/")
     response = HttpResponse()
     response[HEADER] = "default-src example.com"
     mw.process_response(request, response)
-    assert response[HEADER] == "default-src example.com"
+    policy_parts = sorted(response[HEADER].split("; "))
+    assert policy_parts == ["default-src example.com 'self'"]
+
+
+def test_dont_replace_when_merge_disabled() -> None:
+    request = rf.get("/")
+    http_response = HttpResponse()
+    http_response[HEADER] = "default-src example.com"
+    middleware = CSPMiddleware(response())
+    middleware.merge_existing_headers = False
+    middleware.process_response(request, http_response)
+    assert http_response[HEADER] == "default-src example.com"
+
+
+@override_settings(
+    CONTENT_SECURITY_POLICY={"DIRECTIVES": {"script-src": [SELF, NONCE]}},
+)
+def test_existing_view_hash_is_composed_with_generated_nonce() -> None:
+    request = rf.get("/")
+    mw.process_request(request)
+    nonce = str(getattr(request, "csp_nonce"))
+    response = HttpResponse()
+    response[HEADER] = "script-src 'sha256-view-hash'"
+
+    mw.process_response(request, response)
+
+    script_directive = next(part for part in response[HEADER].split("; ") if part.startswith("script-src "))
+    assert f"'nonce-{nonce}'" in script_directive
+    assert "'sha256-view-hash'" in script_directive
+    assert SELF in script_directive
+
+
+@override_settings(
+    CONTENT_SECURITY_POLICY={"DIRECTIVES": {"script-src": [SELF, NONCE]}},
+)
+def test_view_hash_declared_as_policy_update_uses_single_header_generation() -> None:
+    request = rf.get("/")
+    mw.process_request(request)
+    nonce = str(getattr(request, "csp_nonce"))
+    response = HttpResponse()
+    setattr(response, "_csp_update", {"script-src": ["'sha256-view-hash'"]})
+
+    mw.process_response(request, response)
+
+    script_directive = next(part for part in response[HEADER].split("; ") if part.startswith("script-src "))
+    assert f"'nonce-{nonce}'" in script_directive
+    assert "'sha256-view-hash'" in script_directive
+    assert SELF in script_directive
+
+
+def test_merge_existing_report_only_header() -> None:
+    request = rf.get("/")
+    response = HttpResponse()
+    response[HEADER_REPORT_ONLY] = "img-src example.net"
+    mw.process_response(request, response)
+    policy_parts = sorted(response[HEADER_REPORT_ONLY].split("; "))
+    assert policy_parts == ["img-src example.net"]
 
 
 def test_use_config() -> None:

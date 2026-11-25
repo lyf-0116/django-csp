@@ -98,6 +98,12 @@ separate list to using a sentinel `NONCE` value in the directive itself.
 
 ## New Features and Improvements
 
+- **Existing Header Merging**: `CSPMiddleware` now parses and merges a CSP header already set by a
+view instead of leaving two independently generated policies unresolved. `csp.utils.merge_policies`
+provides inheritance-aware composition and an optional strict intersection mode. Set
+`CSPMiddleware.merge_existing_headers = False` to restore the previous leave-existing-header
+behavior.
+
 - **Dual Policy Support**: Added support for enforced and report-only policies simultaneously using
 the separate `CONTENT_SECURITY_POLICY` and `CONTENT_SECURITY_POLICY_REPORT_ONLY` settings.
 
